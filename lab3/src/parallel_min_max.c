@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include <sys/time.h>
 #include <sys/types.h>
@@ -40,24 +42,30 @@ int main(int argc, char **argv) {
         switch (option_index) {
           case 0:
             seed = atoi(optarg);
-            // your code here
-            // error handling
+            if (seed <= 0) {
+              printf("seed must be a positive number\n");
+              return 1;
+            }
             break;
           case 1:
             array_size = atoi(optarg);
-            // your code here
-            // error handling
+            if (array_size <= 0) {
+              printf("array_size must be a positive number\n");
+              return 1;
+            }
             break;
           case 2:
             pnum = atoi(optarg);
-            // your code here
-            // error handling
+            if (pnum <= 0) {
+              printf("pnum must be a positive number\n");
+              return 1;
+            }
             break;
           case 3:
             with_files = true;
             break;
 
-          defalut:
+          default:
             printf("Index %d is out of options\n", option_index);
         }
         break;
@@ -88,25 +96,60 @@ int main(int argc, char **argv) {
   GenerateArray(array, array_size, seed);
   int active_child_processes = 0;
 
+  // Для pipe способа - создаем массив pipe'ов
+  int pipes[pnum][2];
+  if (!with_files) {
+    for (int i = 0; i < pnum; i++) {
+      if (pipe(pipes[i]) == -1) {
+        perror("pipe failed");
+        return 1;
+      }
+    }
+  }
+
+  // Для файлового способа - массив для хранения PID дочерних процессов
+  pid_t child_pids[pnum];
+
   struct timeval start_time;
   gettimeofday(&start_time, NULL);
+
+  // Вычисляем размер части массива для каждого процесса
+  int chunk_size = array_size / pnum;
 
   for (int i = 0; i < pnum; i++) {
     pid_t child_pid = fork();
     if (child_pid >= 0) {
       // successful fork
       active_child_processes += 1;
+      child_pids[i] = child_pid;
+      
       if (child_pid == 0) {
         // child process
-
-        // parallel somehow
+        // Вычисляем границы для текущего процесса
+        int start = i * chunk_size;
+        int end = (i == pnum - 1) ? array_size : (i + 1) * chunk_size;
+        
+        struct MinMax local_min_max = GetMinMax(array, start, end);
 
         if (with_files) {
           // use files here
+          char filename[32];
+          sprintf(filename, "min_max_%d.txt", getpid());
+          FILE *file = fopen(filename, "w");
+          if (file == NULL) {
+            perror("fopen failed");
+            exit(1);
+          }
+          fprintf(file, "%d %d", local_min_max.min, local_min_max.max);
+          fclose(file);
         } else {
           // use pipe here
+          close(pipes[i][0]); // закрываем чтение в дочернем процессе
+          write(pipes[i][1], &local_min_max, sizeof(struct MinMax));
+          close(pipes[i][1]);
         }
-        return 0;
+        free(array);
+        exit(0);
       }
 
     } else {
@@ -115,9 +158,9 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Ожидаем завершения всех дочерних процессов
   while (active_child_processes > 0) {
-    // your code here
-
+    wait(NULL);
     active_child_processes -= 1;
   }
 
@@ -131,8 +174,25 @@ int main(int argc, char **argv) {
 
     if (with_files) {
       // read from files
+      char filename[32];
+      sprintf(filename, "min_max_%d.txt", child_pids[i]);
+      FILE *file = fopen(filename, "r");
+      if (file == NULL) {
+        perror("fopen failed");
+        continue;
+      }
+      fscanf(file, "%d %d", &min, &max);
+      fclose(file);
+      // Удаляем временный файл
+      remove(filename);
     } else {
       // read from pipes
+      close(pipes[i][1]); // закрываем запись в родительском процессе
+      struct MinMax local_min_max;
+      read(pipes[i][0], &local_min_max, sizeof(struct MinMax));
+      close(pipes[i][0]);
+      min = local_min_max.min;
+      max = local_min_max.max;
     }
 
     if (min < min_max.min) min_max.min = min;
@@ -153,3 +213,9 @@ int main(int argc, char **argv) {
   fflush(NULL);
   return 0;
 }
+
+
+
+// ./parallel_min_max --seed 123 --array_size 100 --pnum 4                                     pipe по умолчанию
+
+// ./parallel_min_max --seed 123 --array_size 100 --pnum 4 --by_files                          тестирование файлами
